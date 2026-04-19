@@ -51,13 +51,41 @@ log = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Priority": "u=0, i",
 }
+
+# Persistent session — keeps cookies (including Cloudflare clearance) between requests
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+
+def warmup_session():
+    """Visit the homepage first to get cookies set, like a real user would."""
+    try:
+        log.info("Warming up session (fetching homepage first)…")
+        SESSION.get("https://www.immobilienscout24.de/", timeout=15)
+        time.sleep(2)   # small pause like a human
+    except requests.RequestException as e:
+        log.warning(f"Warmup failed (continuing anyway): {e}")
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 
