@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ImmobilienScout24 → Telegram Apartment Bot (cloudscraper edition)
-Uses cloudscraper to bypass Cloudflare's JS challenge.
+ImmobilienScout24 → Telegram Apartment Bot (ScraperAPI edition)
+Routes all ImmoScout requests through ScraperAPI to bypass Cloudflare.
 """
 
 import os
@@ -9,17 +9,19 @@ import json
 import time
 import logging
 import schedule
-import cloudscraper
+import requests
+from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID        = os.environ["CHAT_ID"]
+TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID         = os.environ["CHAT_ID"]
+SCRAPERAPI_KEY  = os.environ["SCRAPERAPI_KEY"]   # from scraperapi.com dashboard
 
 # Your custom shape-based search:
-# Munich area · furnished kitchen · 2+ rooms · max 1600€ warm · 55m²+
-SEARCH_URL = (
+# Munich · furnished kitchen · 2+ rooms · max 1600€ warm · 55m²+
+TARGET_URL = (
     "https://www.immobilienscout24.de/Suche/shape/wohnung-mit-einbaukueche-mieten"
     "?shape=b213ZEh5d2tlQWpMd19AcE95bkBgaUB9c0FzR3lsQ3dDfWVAZ0V5VW9Ba1pwWntqQmNnQGVfQ1d1eUFhZ0BfTn1vQT90SG5iQXd2QHpxRGJNdmJBZUR2RWdsQHlYc1thQHlgQWJeZVB_XF9OeH1DYktodERoQ2hDeGlDbGNA"
     "&numberofrooms=2.0-"
@@ -31,7 +33,7 @@ SEARCH_URL = (
     "&pagenumber=1"
 )
 
-POLL_INTERVAL_SECONDS = 180   # 3 minutes — gentler to avoid detection
+POLL_INTERVAL_SECONDS = 600   # 10 min — stays within 5,000 req/month free tier
 SEEN_IDS_FILE = "seen_ids.json"
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -43,20 +45,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── CLOUDSCRAPER ────────────────────────────────────────────────────────────
+# ─── SCRAPERAPI WRAPPER ──────────────────────────────────────────────────────
 
-# cloudscraper mimics a real Chrome browser and solves Cloudflare's JS challenge
-scraper = cloudscraper.create_scraper(
-    browser={
-        "browser":  "chrome",
-        "platform": "darwin",      # macOS
-        "desktop":  True,
-    },
-    delay=10,   # let JS challenge resolve
-)
-
-# Use a standard Telegram-ready requests session too
-import requests
+def scraperapi_url(target: str) -> str:
+    """Wrap a target URL in a ScraperAPI request."""
+    params = {
+        "api_key":          SCRAPERAPI_KEY,
+        "url":              target,
+        "country_code":     "de",     # German residential IPs
+        "render":           "false",  # no JS rendering needed (saves credits)
+    }
+    return f"https://api.scraperapi.com/?{urlencode(params)}"
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 
@@ -73,9 +72,8 @@ def save_seen_ids(ids: set):
 # ─── SCRAPING ────────────────────────────────────────────────────────────────
 
 def fetch_listings() -> list[dict]:
-    """Scrape the first page of ImmoScout24 results via cloudscraper."""
     try:
-        resp = scraper.get(SEARCH_URL, timeout=30)
+        resp = requests.get(scraperapi_url(TARGET_URL), timeout=60)
         resp.raise_for_status()
     except Exception as e:
         log.error(f"Request failed: {e}")
@@ -158,9 +156,8 @@ def check_for_new():
     seen = load_seen_ids()
     listings = fetch_listings()
 
-    # First run: baseline, no notifications
     if not seen and listings:
-        log.info("First run — saving existing listings as baseline, no notifications")
+        log.info("First run — saving existing listings as baseline")
         save_seen_ids({l["id"] for l in listings})
         return
 
@@ -177,8 +174,8 @@ def check_for_new():
     save_seen_ids(seen)
 
 def main():
-    log.info("ImmoScout24 → Telegram bot starting (cloudscraper)…")
-    send_telegram("🤖 ImmoScout24-Bot (v2) gestartet! Suche läuft.")
+    log.info("ImmoScout24 → Telegram bot starting (via ScraperAPI)…")
+    send_telegram("🤖 ImmoScout24-Bot (v3 / ScraperAPI) gestartet!")
 
     check_for_new()
     schedule.every(POLL_INTERVAL_SECONDS).seconds.do(check_for_new)
