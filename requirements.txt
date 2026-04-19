@@ -1,5 +1,5 @@
-requests
-cloudscraper
-schedule
-beautifulsoup4
-lxml
+requests==2.32.3
+cloudscraper==1.2.71
+schedule==1.2.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
