@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kleinanzeigen → Telegram Apartment Bot
-Polls kleinanzeigen.de for new rental listings and sends them to Telegram.
+ImmobilienScout24 → Telegram Apartment Bot (cloudscraper edition)
+Uses cloudscraper to bypass Cloudflare's JS challenge.
 """
 
 import os
@@ -9,7 +9,7 @@ import json
 import time
 import logging
 import schedule
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -17,14 +17,21 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID        = os.environ["CHAT_ID"]
 
-# Munich rentals · min 2 rooms · max 1600€ · min 55m²
-# To change filters: go to https://www.kleinanzeigen.de/s-wohnung-mieten/
-# apply filters in the browser, then copy the URL from the address bar
+# Your custom shape-based search:
+# Munich area · furnished kitchen · 2+ rooms · max 1600€ warm · 55m²+
 SEARCH_URL = (
-    "https://www.kleinanzeigen.de/s-wohnung-mieten/muenchen/sortierung:neuste/preis::1500/c203l6411+wohnung_mieten.qm_d:55%2C+wohnung_mieten.swap_s:nein+wohnung_mieten.zimmer_d:2%2C"
+    "https://www.immobilienscout24.de/Suche/shape/wohnung-mit-einbaukueche-mieten"
+    "?shape=b213ZEh5d2tlQWpMd19AcE95bkBgaUB9c0FzR3lsQ3dDfWVAZ0V5VW9Ba1pwWntqQmNnQGVfQ1d1eUFhZ0BfTn1vQT90SG5iQXd2QHpxRGJNdmJBZUR2RWdsQHlYc1thQHlgQWJeZVB_XF9OeH1DYktodERoQ2hDeGlDbGNA"
+    "&numberofrooms=2.0-"
+    "&price=-1600.0"
+    "&livingspace=55.0-"
+    "&exclusioncriteria=swapflat"
+    "&pricetype=calculatedtotalrent"
+    "&sorting=2"
+    "&pagenumber=1"
 )
 
-POLL_INTERVAL_SECONDS = 120   # 2 minutes — be gentle
+POLL_INTERVAL_SECONDS = 180   # 3 minutes — gentler to avoid detection
 SEEN_IDS_FILE = "seen_ids.json"
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -36,15 +43,20 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+# ─── CLOUDSCRAPER ────────────────────────────────────────────────────────────
+
+# cloudscraper mimics a real Chrome browser and solves Cloudflare's JS challenge
+scraper = cloudscraper.create_scraper(
+    browser={
+        "browser":  "chrome",
+        "platform": "darwin",      # macOS
+        "desktop":  True,
+    },
+    delay=10,   # let JS challenge resolve
+)
+
+# Use a standard Telegram-ready requests session too
+import requests
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 
@@ -61,46 +73,58 @@ def save_seen_ids(ids: set):
 # ─── SCRAPING ────────────────────────────────────────────────────────────────
 
 def fetch_listings() -> list[dict]:
+    """Scrape the first page of ImmoScout24 results via cloudscraper."""
     try:
-        resp = requests.get(SEARCH_URL, headers=HEADERS, timeout=15)
+        resp = scraper.get(SEARCH_URL, timeout=30)
         resp.raise_for_status()
-    except requests.RequestException as e:
+    except Exception as e:
         log.error(f"Request failed: {e}")
         return []
 
     soup = BeautifulSoup(resp.text, "lxml")
     listings = []
 
-    for item in soup.select("article.aditem"):
-        ad_id = item.get("data-adid", "").strip()
-        if not ad_id:
+    for item in soup.select("li[data-id]"):
+        listing_id = item.get("data-id", "").strip()
+        if not listing_id:
             continue
 
-        title_el = item.select_one("a.ellipsis")
+        title_el = item.select_one("h5.result-list-entry__brand-title, .result-list-entry__headline")
         title = title_el.get_text(strip=True) if title_el else "Wohnung"
-        href = title_el["href"] if title_el and title_el.get("href") else ""
+
+        price_el = item.select_one(
+            ".result-list-entry__primary-criterion dt:-soup-contains('Kaltmiete') + dd,"
+            ".result-list-entry__price"
+        )
+        price = price_el.get_text(strip=True) if price_el else "Preis unbekannt"
+
+        criteria = {
+            el.find("dt").get_text(strip=True): el.find("dd").get_text(strip=True)
+            for el in item.select(".result-list-entry__primary-criterion")
+            if el.find("dt") and el.find("dd")
+        }
+        size  = criteria.get("Wohnfläche", "—")
+        rooms = criteria.get("Zimmer",     "—")
+
+        addr_el = item.select_one(".result-list-entry__address")
+        address = addr_el.get_text(strip=True) if addr_el else "Adresse unbekannt"
+
+        link_el = item.select_one("a.result-list-entry__brand-title-container, a[href*='/expose/']")
+        href = link_el["href"] if link_el and link_el.get("href") else ""
         if href.startswith("/"):
-            href = "https://www.kleinanzeigen.de" + href
-
-        price_el = item.select_one(".aditem-main--middle--price-shipping--price, .aditem-main--middle--price")
-        price = price_el.get_text(strip=True) if price_el else "Preis n/a"
-
-        loc_el = item.select_one(".aditem-main--top--left")
-        location = loc_el.get_text(strip=True) if loc_el else ""
-
-        tags = [t.get_text(strip=True) for t in item.select(".simpletag")]
-        tags_str = " · ".join(tags) if tags else ""
+            href = "https://www.immobilienscout24.de" + href
 
         listings.append({
-            "id":       ad_id,
-            "title":    title,
-            "price":    price,
-            "location": location,
-            "tags":     tags_str,
-            "url":      href,
+            "id":      listing_id,
+            "title":   title,
+            "price":   price,
+            "size":    size,
+            "rooms":   rooms,
+            "address": address,
+            "url":     href,
         })
 
-    log.info(f"Fetched {len(listings)} listings from Kleinanzeigen")
+    log.info(f"Fetched {len(listings)} listings from ImmoScout24")
     return listings
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -123,9 +147,8 @@ def send_telegram(text: str):
 def format_listing(l: dict) -> str:
     return (
         f"🏠 <b>{l['title']}</b>\n"
-        f"💶 {l['price']}\n"
-        f"📍 {l['location']}\n"
-        f"🏷 {l['tags']}\n"
+        f"💶 {l['price']}   🛏 {l['rooms']} Zi.   📐 {l['size']}\n"
+        f"📍 {l['address']}\n"
         f"🔗 <a href=\"{l['url']}\">Zur Anzeige →</a>"
     )
 
@@ -135,7 +158,7 @@ def check_for_new():
     seen = load_seen_ids()
     listings = fetch_listings()
 
-    # First run: save all as baseline so you don't get spammed with 25 old ads
+    # First run: baseline, no notifications
     if not seen and listings:
         log.info("First run — saving existing listings as baseline, no notifications")
         save_seen_ids({l["id"] for l in listings})
@@ -154,8 +177,8 @@ def check_for_new():
     save_seen_ids(seen)
 
 def main():
-    log.info("Kleinanzeigen → Telegram bot starting…")
-    send_telegram("🤖 Kleinanzeigen-Bot gestartet! Ich benachrichtige dich über neue Wohnungen in München.")
+    log.info("ImmoScout24 → Telegram bot starting (cloudscraper)…")
+    send_telegram("🤖 ImmoScout24-Bot (v2) gestartet! Suche läuft.")
 
     check_for_new()
     schedule.every(POLL_INTERVAL_SECONDS).seconds.do(check_for_new)
