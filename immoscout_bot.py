@@ -21,10 +21,7 @@ CHAT_ID        = os.environ["CHAT_ID"]
 # To change filters: go to https://www.kleinanzeigen.de/s-wohnung-mieten/
 # apply filters in the browser, then copy the URL from the address bar
 SEARCH_URL = (
-    "https://www.kleinanzeigen.de/s-wohnung-mieten/muenchen/"
-    "anzeige:angebote/preis::1600/"
-    "c203l6411+wohnung_mieten.qm_d:55,"
-    "+wohnung_mieten.zimmer_d:2,"
+    "https://www.kleinanzeigen.de/s-wohnung-mieten/muenchen/sortierung:neuste/preis::1500/c203l6411+wohnung_mieten.qm_d:55%2C+wohnung_mieten.swap_s:nein+wohnung_mieten.zimmer_d:2%2C"
 )
 
 POLL_INTERVAL_SECONDS = 120   # 2 minutes — be gentle
