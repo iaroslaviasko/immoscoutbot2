@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-ImmobilienScout24 → Telegram Apartment Bot
-Polls ImmoScout24 for new listings and sends them instantly to Telegram.
-
-Setup:
-  1. pip install requests python-telegram-bot schedule beautifulsoup4 lxml
-  2. Fill in TELEGRAM_TOKEN, CHAT_ID, and SEARCH_URL below
-  3. python immoscout_bot.py
+Kleinanzeigen → Telegram Apartment Bot
+Polls kleinanzeigen.de for new rental listings and sends them to Telegram.
 """
 
 import os
@@ -15,29 +10,24 @@ import time
 import logging
 import schedule
 import requests
-from datetime import datetime
 from bs4 import BeautifulSoup
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]   # set in Railway dashboard → Variables
-CHAT_ID        = os.environ["CHAT_ID"]           # set in Railway dashboard → Variables
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID        = os.environ["CHAT_ID"]
 
-# Your custom shape-based search:
-# Munich area · furnished kitchen · 2+ rooms · max 1600€ warm · 55m²+
+# Munich rentals · min 2 rooms · max 1600€ · min 55m²
+# To change filters: go to https://www.kleinanzeigen.de/s-wohnung-mieten/
+# apply filters in the browser, then copy the URL from the address bar
 SEARCH_URL = (
-    "https://www.immobilienscout24.de/Suche/shape/wohnung-mit-einbaukueche-mieten"
-    "?shape=b213ZEh5d2tlQWpMd19AcE95bkBgaUB9c0FzR3lsQ3dDfWVAZ0V5VW9Ba1pwWntqQmNnQGVfQ1d1eUFhZ0BfTn1vQT90SG5iQXd2QHpxRGJNdmJBZUR2RWdsQHlYc1thQHlgQWJeZVB_XF9OeH1DYktodERoQ2hDeGlDbGNA"
-    "&numberofrooms=2.0-"
-    "&price=-1600.0"
-    "&livingspace=55.0-"
-    "&exclusioncriteria=swapflat"
-    "&pricetype=calculatedtotalrent"
-    "&sorting=2"        # sort by newest first
-    "&pagenumber=1"
+    "https://www.kleinanzeigen.de/s-wohnung-mieten/muenchen/"
+    "anzeige:angebote/preis::1600/"
+    "c203l6411+wohnung_mieten.qm_d:55,"
+    "+wohnung_mieten.zimmer_d:2,"
 )
 
-POLL_INTERVAL_SECONDS = 60   # check every 60 seconds
+POLL_INTERVAL_SECONDS = 120   # 2 minutes — be gentle
 SEEN_IDS_FILE = "seen_ids.json"
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
@@ -55,37 +45,9 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,image/apng,*/*;q=0.8,"
-        "application/signed-exchange;v=b3;q=0.7"
-    ),
-    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br, zstd",
-    "Cache-Control": "max-age=0",
-    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"macOS"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Priority": "u=0, i",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
-
-# Persistent session — keeps cookies (including Cloudflare clearance) between requests
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-
-def warmup_session():
-    """Visit the homepage first to get cookies set, like a real user would."""
-    try:
-        log.info("Warming up session (fetching homepage first)…")
-        SESSION.get("https://www.immobilienscout24.de/", timeout=15)
-        time.sleep(2)   # small pause like a human
-    except requests.RequestException as e:
-        log.warning(f"Warmup failed (continuing anyway): {e}")
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 
@@ -102,7 +64,6 @@ def save_seen_ids(ids: set):
 # ─── SCRAPING ────────────────────────────────────────────────────────────────
 
 def fetch_listings() -> list[dict]:
-    """Scrape the first page of ImmoScout24 results."""
     try:
         resp = requests.get(SEARCH_URL, headers=HEADERS, timeout=15)
         resp.raise_for_status()
@@ -113,52 +74,36 @@ def fetch_listings() -> list[dict]:
     soup = BeautifulSoup(resp.text, "lxml")
     listings = []
 
-    # ImmoScout24 wraps each result in a <li> with data-id
-    for item in soup.select("li[data-id]"):
-        listing_id = item.get("data-id", "").strip()
-        if not listing_id:
+    for item in soup.select("article.aditem"):
+        ad_id = item.get("data-adid", "").strip()
+        if not ad_id:
             continue
 
-        # Title
-        title_el = item.select_one("h5.result-list-entry__brand-title, .result-list-entry__headline")
+        title_el = item.select_one("a.ellipsis")
         title = title_el.get_text(strip=True) if title_el else "Wohnung"
-
-        # Price
-        price_el = item.select_one(".result-list-entry__primary-criterion dt:-soup-contains('Kaltmiete') + dd,"
-                                   ".result-list-entry__price")
-        price = price_el.get_text(strip=True) if price_el else "Preis unbekannt"
-
-        # Size & rooms — grab all criteria
-        criteria = {
-            el.find("dt").get_text(strip=True): el.find("dd").get_text(strip=True)
-            for el in item.select(".result-list-entry__primary-criterion")
-            if el.find("dt") and el.find("dd")
-        }
-
-        size  = criteria.get("Wohnfläche", "—")
-        rooms = criteria.get("Zimmer",     "—")
-
-        # Address
-        addr_el = item.select_one(".result-list-entry__address")
-        address = addr_el.get_text(strip=True) if addr_el else "Adresse unbekannt"
-
-        # Direct link
-        link_el = item.select_one("a.result-list-entry__brand-title-container, a[href*='/expose/']")
-        href = link_el["href"] if link_el and link_el.get("href") else ""
+        href = title_el["href"] if title_el and title_el.get("href") else ""
         if href.startswith("/"):
-            href = "https://www.immobilienscout24.de" + href
+            href = "https://www.kleinanzeigen.de" + href
+
+        price_el = item.select_one(".aditem-main--middle--price-shipping--price, .aditem-main--middle--price")
+        price = price_el.get_text(strip=True) if price_el else "Preis n/a"
+
+        loc_el = item.select_one(".aditem-main--top--left")
+        location = loc_el.get_text(strip=True) if loc_el else ""
+
+        tags = [t.get_text(strip=True) for t in item.select(".simpletag")]
+        tags_str = " · ".join(tags) if tags else ""
 
         listings.append({
-            "id":      listing_id,
-            "title":   title,
-            "price":   price,
-            "size":    size,
-            "rooms":   rooms,
-            "address": address,
-            "url":     href,
+            "id":       ad_id,
+            "title":    title,
+            "price":    price,
+            "location": location,
+            "tags":     tags_str,
+            "url":      href,
         })
 
-    log.info(f"Fetched {len(listings)} listings from ImmoScout24")
+    log.info(f"Fetched {len(listings)} listings from Kleinanzeigen")
     return listings
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -181,8 +126,9 @@ def send_telegram(text: str):
 def format_listing(l: dict) -> str:
     return (
         f"🏠 <b>{l['title']}</b>\n"
-        f"💶 {l['price']}   🛏 {l['rooms']} Zi.   📐 {l['size']}\n"
-        f"📍 {l['address']}\n"
+        f"💶 {l['price']}\n"
+        f"📍 {l['location']}\n"
+        f"🏷 {l['tags']}\n"
         f"🔗 <a href=\"{l['url']}\">Zur Anzeige →</a>"
     )
 
@@ -191,8 +137,14 @@ def format_listing(l: dict) -> str:
 def check_for_new():
     seen = load_seen_ids()
     listings = fetch_listings()
-    new = [l for l in listings if l["id"] not in seen]
 
+    # First run: save all as baseline so you don't get spammed with 25 old ads
+    if not seen and listings:
+        log.info("First run — saving existing listings as baseline, no notifications")
+        save_seen_ids({l["id"] for l in listings})
+        return
+
+    new = [l for l in listings if l["id"] not in seen]
     if not new:
         log.info("No new listings.")
         return
@@ -201,16 +153,13 @@ def check_for_new():
     for l in new:
         send_telegram(format_listing(l))
         seen.add(l["id"])
-        time.sleep(0.5)   # avoid Telegram rate limit
-
+        time.sleep(0.5)
     save_seen_ids(seen)
 
 def main():
-    log.info("ImmoScout24 → Telegram bot starting…")
+    log.info("Kleinanzeigen → Telegram bot starting…")
+    send_telegram("🤖 Kleinanzeigen-Bot gestartet! Ich benachrichtige dich über neue Wohnungen in München.")
 
-    send_telegram("🤖 ImmoScout24-Bot gestartet! Ich benachrichtige dich über neue Wohnungen.")
-
-    # Run once immediately, then on schedule
     check_for_new()
     schedule.every(POLL_INTERVAL_SECONDS).seconds.do(check_for_new)
 
